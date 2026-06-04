@@ -1,0 +1,84 @@
+{
+  "name": "Amplitude → Google Sheets → Notion Daily",
+  "nodes": [
+    {
+      "id": "sch-001",
+      "name": "Daily at 8am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 200],
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "hours", "triggerAtHour": 8 }
+          ]
+        }
+      }
+    },
+    {
+      "id": "cod-001",
+      "name": "Fetch & Merge Amplitude",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 200],
+      "parameters": {
+        "jsCode": "// === CONFIG ===\n// Set these in n8n → Settings → Environment Variables\n// AMPLITUDE_API_KEY  and  AMPLITUDE_SECRET_KEY\n// OR replace the fallback strings below with your actual keys.\nconst API_KEY = $env.AMPLITUDE_API_KEY  || '6d32ffa2d1954f01a262fcdbb0a3e7b1';\nconst SECRET  = $env.AMPLITUDE_SECRET_KEY || '716dfa8ea6e2aa4a4e8cef3cdf3b6fb3';\n\nconst yesterday = new Date();\nyesterday.setDate(yesterday.getDate() - 1);\nconst pad = n => String(n).padStart(2, '0');\nconst dateStr = `${yesterday.getFullYear()}${pad(yesterday.getMonth()+1)}${pad(yesterday.getDate())}`;\n\nconst auth    = 'Basic ' + Buffer.from(`${API_KEY}:${SECRET}`).toString('base64');\nconst FILTERS = JSON.stringify([\n  {prop: 'gp:utm_medium',  op: 'is',     values: ['Influencers']},\n  {prop: 'gp:utm_content', op: 'is not', values: ['adaff']}\n]);\nconst GROUP = 'gp:utm_campaign';\n\nconst EVENTS = [\n  'Viewed Marketing Site Landing Page',\n  'G_account_created',\n  'G_delegation_enabled'\n];\n\nasync function fetchEvent(eventName) {\n  const params = new URLSearchParams({\n    e:     JSON.stringify({event_type: eventName}),\n    s:     FILTERS,\n    g:     GROUP,\n    start: dateStr,\n    end:   dateStr,\n    m:     'totals',\n    i:     '1'\n  });\n  const res = await fetch(\n    `https://amplitude.com/api/2/events/segmentation?${params}`,\n    { headers: { Authorization: auth } }\n  );\n  if (!res.ok) throw new Error(`Amplitude ${res.status} for \"${eventName}\": ${await res.text()}`);\n  return (await res.json()).data;\n}\n\nconst [d0, d1, d2] = await Promise.all(EVENTS.map(fetchEvent));\nconst allData = { [EVENTS[0]]: d0, [EVENTS[1]]: d1, [EVENTS[2]]: d2 };\n\nconst combined = {};\nfor (const [eventName, data] of Object.entries(allData)) {\n  const labels  = data.seriesLabels || [];\n  const series  = data.series       || [];\n  const xValues = data.xValues      || [];\n  for (let i = 0; i < labels.length; i++) {\n    const campaign = Array.isArray(labels[i]) ? labels[i][0] : labels[i];\n    const counts   = series[i] || [];\n    for (let j = 0; j < xValues.length; j++) {\n      const key = `${campaign}||${xValues[j]}`;\n      if (!combined[key]) {\n        combined[key] = {\n          utm_Campaign: campaign,\n          date: xValues[j],\n          'Viewed Marketing Site Landing Page': 0,\n          G_account_created:   0,\n          G_delegation_enabled: 0\n        };\n      }\n      combined[key][eventName] = counts[j] || 0;\n    }\n  }\n}\n\nreturn Object.values(combined).map(row => ({ json: row }));\n"
+      }
+    },
+    {
+      "id": "gsh-001",
+      "name": "Append to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [480, 200],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1eghadoVWL30ALoa8ieemziRJL4rcHOOTniQz40xFlW8",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Daily-data",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {}
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "id": "cmd-001",
+      "name": "Sync Amplitude → Notion",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [720, 200],
+      "parameters": {
+        "command": "cd /Users/chriscespedes/Documents/Standing-agenda && python3 daily_amplitude_sync.py"
+      }
+    }
+  ],
+  "connections": {
+    "Daily at 8am": {
+      "main": [[ { "node": "Fetch & Merge Amplitude", "type": "main", "index": 0 } ]]
+    },
+    "Fetch & Merge Amplitude": {
+      "main": [[ { "node": "Append to Google Sheets", "type": "main", "index": 0 } ]]
+    },
+    "Append to Google Sheets": {
+      "main": [[ { "node": "Sync Amplitude → Notion", "type": "main", "index": 0 } ]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
