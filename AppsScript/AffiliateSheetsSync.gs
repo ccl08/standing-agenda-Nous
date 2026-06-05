@@ -11,13 +11,13 @@
 //   6. Write UTM-Mapping tab — shows every influencer's resolution
 //      status so unresolved ones are visible and can be fixed
 //
-// Setup: run asMCreateDailyTrigger() once from the editor.
+// Setup: run asMCreateMonthlyTrigger() once from the editor.
 // Requires AFF_SHEET_ID defined in AffiliateSync.gs (same project).
 // ============================================================
 
 var ASM_MERGE_SHEET_ID   = '19COFeVqjvByU1NZUVnBnuxA1_6eBToZnitGzz0mRWlA';
 var ASM_NOTION_VALUES_ID = '1eFkukSGwI7E4bQFk2lolekx3abQkYKBzr3r2V8bpV6A';
-var ASM_AFF_DATA_TAB     = 'Affiliates-data';
+var ASM_AFF_DATA_TAB     = 'Affiliates-daily-data';
 var ASM_MERGE_TAB        = 'MergeData';
 var ASM_UTM_MAP_TAB      = 'UTM-Mapping';
 var ASM_LIFETIME_START   = '2026-03';  // March 2026 — lifetime start
@@ -148,7 +148,9 @@ function asmLoadUtmOverrides_() {
     for (var i = 1; i < raw.length; i++) {
       var name      = String(raw[i][colName] || '').trim();
       var overRaw   = colOver !== -1 ? String(raw[i][colOver] || '').trim().toLowerCase() : '';
-      var canonical = colKey  !== -1 ? String(raw[i][colKey]  || '').trim().toLowerCase() : overRaw;
+      var canonical = colKey  !== -1 ? String(raw[i][colKey]  || '').trim().toLowerCase() : '';
+      // If Resolved Key is empty, derive canonical from first value in UTM Override
+      if (!canonical && overRaw) canonical = overRaw.split(/\s+or\s+|,/)[0].trim();
       if (!name || !canonical) continue;
 
       overrides[name.toLowerCase()] = canonical;
