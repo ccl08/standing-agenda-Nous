@@ -17,37 +17,48 @@ var EVENTS = [
 ];
 
 var FILTERS = JSON.stringify([
-  { prop: 'gp:utm_medium',  op: 'is',     values: ['Influencers'] },
-  { prop: 'gp:utm_content', op: 'is not', values: ['adaff'] }
+  { prop: 'gp:utm_medium', op: 'is', values: ['Influencers'] }
 ]);
 
 // ── entry points ─────────────────────────────────────────────
 
 function dailySync() {
-  var today    = new Date();
-  var dateStr  = formatDate(today);
-  var dateIso  = formatDateIso(today);
+  var now        = new Date();
+  var yesterday  = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  var twoDaysAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 2);
 
-  Logger.log('Daily sync (today): ' + dateIso);
+  var startStr  = formatDate(twoDaysAgo);
+  var endStr    = formatDate(yesterday);
+  var dateIsos  = [formatDateIso(twoDaysAgo), formatDateIso(yesterday)];
+
+  Logger.log('Daily sync window: ' + dateIsos.join(' → '));
 
   var allData = {};
   for (var i = 0; i < EVENTS.length; i++) {
     Logger.log('Fetching: ' + EVENTS[i]);
-    allData[EVENTS[i]] = fetchAmplitude(EVENTS[i], dateStr, dateStr);
+    allData[EVENTS[i]] = fetchAmplitude(EVENTS[i], startStr, endStr);
   }
 
   var rows = buildRows(allData);
   Logger.log('Built ' + rows.length + ' rows');
 
-  upsertToSheet(rows, dateIso);
+  upsertToSheet(rows, dateIsos);
   Logger.log('Amplitude → Sheets done. Starting Notion sync...');
   notionSync();
 }
 
 function backfill() {
+  // Clear all data rows (keep header) so re-runs are safe
+  var ss = SpreadsheetApp.openById(AMPLITUDE_SHEET_ID);
+  var ws = ss.getSheetByName(SHEET_TAB);
+  if (ws && ws.getLastRow() > 1) {
+    ws.deleteRows(2, ws.getLastRow() - 1);
+    Logger.log('Cleared existing data rows');
+  }
+
   var yesterday = new Date();
   yesterday.setDate(yesterday.getDate() - 1);
-  syncRange('20260501', formatDate(yesterday));
+  syncRange('20260601', formatDate(yesterday));
 }
 
 // ── core sync ────────────────────────────────────────────────
@@ -133,7 +144,10 @@ function buildRows(allData) {
   return Object.keys(combined).map(function(k) { return combined[k]; });
 }
 
-function upsertToSheet(rows, dateIso) {
+// dateIsos can be a single ISO string or an array — all matching rows are replaced.
+function upsertToSheet(rows, dateIsos) {
+  if (typeof dateIsos === 'string') dateIsos = [dateIsos];
+
   var ss = SpreadsheetApp.openById(AMPLITUDE_SHEET_ID);
   var ws = ss.getSheetByName(SHEET_TAB);
   if (!ws) ws = ss.insertSheet(SHEET_TAB);
@@ -147,13 +161,13 @@ function upsertToSheet(rows, dateIso) {
   if (ws.getLastRow() === 0) {
     ws.appendRow(headers);
   } else {
-    var allVals   = ws.getDataRange().getValues();
+    var allVals    = ws.getDataRange().getValues();
     var dateColIdx = allVals[0].indexOf('date');
-    var toDelete  = [];
+    var toDelete   = [];
     for (var i = 1; i < allVals.length; i++) {
       var cellVal = allVals[i][dateColIdx];
       var cellStr = cellVal instanceof Date ? formatDateIso(cellVal) : String(cellVal);
-      if (cellStr === dateIso) toDelete.push(i + 1);
+      if (dateIsos.indexOf(cellStr) !== -1) toDelete.push(i + 1);
     }
     for (var j = toDelete.length - 1; j >= 0; j--) {
       ws.deleteRow(toDelete[j]);
@@ -166,7 +180,7 @@ function upsertToSheet(rows, dateIso) {
   if (values.length > 0) {
     ws.getRange(ws.getLastRow() + 1, 1, values.length, headers.length).setValues(values);
   }
-  Logger.log('Upserted ' + values.length + ' rows for ' + dateIso + ' to ' + SHEET_TAB);
+  Logger.log('Upserted ' + values.length + ' rows for [' + dateIsos.join(', ') + '] to ' + SHEET_TAB);
 }
 
 function writeToSheet(rows) {

@@ -69,17 +69,18 @@ function affiliateSheetsSync() {
   var start = new Date();
   Logger.log('=== AffiliateSheetsSync start ===');
 
-  // Step 1: load manual overrides from UTM-Mapping tab
-  var overrides = asmLoadUtmOverrides_();
-  Logger.log('UTM overrides loaded: ' + Object.keys(overrides).length);
+  // Step 1: load manual overrides + aliases from UTM-Mapping tab
+  var utmMap    = asmLoadUtmOverrides_();
+  Logger.log('UTM overrides loaded: ' + Object.keys(utmMap.overrides).length +
+             ', aliases: ' + Object.keys(utmMap.aliases).length);
 
-  // Step 2: load Amplitude data (adaff-filtered LP views)
+  // Step 2: load Amplitude data (adaff-filtered LP views) and normalise aliases
   var ampResult = asmLoadAmpData_();
-  var ampData   = ampResult.data;   // { campaign: { 'YYYYMM': lpClicks } }
-  var ampKeys   = ampResult.keys;   // object used as Set of known utm_campaign strings
+  var ampData   = asmNormalizeAliases_(ampResult.data, utmMap.aliases);
+  var ampKeys   = ampResult.keys;
 
   // Step 3: load influencers + resolve UTM keys
-  var influencers = asmLoadNotionValues_(ampKeys, overrides);
+  var influencers = asmLoadNotionValues_(ampKeys, utmMap.overrides);
   Logger.log('Influencers loaded: ' + influencers.length);
 
   // Step 4 + 5: build rows and write MergeData
@@ -100,9 +101,10 @@ function affiliateSheetsSync() {
 function testAffiliateSheetsSync() {
   Logger.log('=== TEST (no write) ===');
 
-  var overrides   = asmLoadUtmOverrides_();
+  var utmMap      = asmLoadUtmOverrides_();
   var ampResult   = asmLoadAmpData_();
-  var influencers = asmLoadNotionValues_(ampResult.keys, overrides);
+  asmNormalizeAliases_(ampResult.data, utmMap.aliases);
+  var influencers = asmLoadNotionValues_(ampResult.keys, utmMap.overrides);
   var buildResult = asmBuildRows_(influencers, ampResult.data);
 
   Logger.log('Would write ' + buildResult.rows.length + ' rows to MergeData (' +
@@ -128,31 +130,41 @@ function testAffiliateSheetsSync() {
 // ── UTM-Mapping reader (Signal 0 — manual overrides) ─────────
 
 function asmLoadUtmOverrides_() {
-  // Reads the UTM Override column from the UTM-Mapping tab.
-  // Returns { normalizedName: utmKey } for rows where Override is filled.
-  var overrides = {};
+  // Reads UTM-Mapping tab. Col B = UTM Override (may contain aliases separated by " or " or ",").
+  // Col C = Resolved Key (canonical). Returns { overrides: {name→canonical}, aliases: {alias→canonical} }.
+  var overrides = {}, aliases = {};
   try {
     var ss    = SpreadsheetApp.openById(ASM_MERGE_SHEET_ID);
     var sheet = ss.getSheetByName(ASM_UTM_MAP_TAB);
-    if (!sheet) return overrides;
+    if (!sheet) return { overrides: overrides, aliases: aliases };
 
     var raw     = sheet.getDataRange().getValues();
     var headers = raw[0].map(function(h) { return String(h).trim().toLowerCase(); });
     var colName = headers.indexOf('name');
     var colOver = headers.indexOf('utm override');
-    if (colName === -1 || colOver === -1) return overrides;
+    var colKey  = headers.indexOf('resolved key');
+    if (colName === -1) return { overrides: overrides, aliases: aliases };
 
     for (var i = 1; i < raw.length; i++) {
-      var name  = String(raw[i][colName] || '').trim();
-      var over  = String(raw[i][colOver] || '').trim().toLowerCase();
-      if (name && over) {
-        overrides[name.toLowerCase()] = over;
+      var name      = String(raw[i][colName] || '').trim();
+      var overRaw   = colOver !== -1 ? String(raw[i][colOver] || '').trim().toLowerCase() : '';
+      var canonical = colKey  !== -1 ? String(raw[i][colKey]  || '').trim().toLowerCase() : overRaw;
+      if (!name || !canonical) continue;
+
+      overrides[name.toLowerCase()] = canonical;
+
+      // Parse col B aliases: "savy.spender or thesavvyspenderofficial" → alias map
+      if (overRaw) {
+        overRaw.split(/\s+or\s+|,/).forEach(function(alias) {
+          alias = alias.trim();
+          if (alias && alias !== canonical) aliases[alias] = canonical;
+        });
       }
     }
   } catch (e) {
     Logger.log('UTM-Mapping read error (non-fatal): ' + e.message);
   }
-  return overrides;
+  return { overrides: overrides, aliases: aliases };
 }
 
 
@@ -213,6 +225,23 @@ function asmWriteUtmMapping_(influencers) {
 
   var unresolved = rows.filter(function(r) { return r[4] === '✗ unresolved'; }).length;
   Logger.log('UTM-Mapping written: ' + rows.length + ' rows, ' + unresolved + ' unresolved (highlighted red)');
+}
+
+
+// ── Alias normalisation ───────────────────────────────────────
+// Rewrites aliased utm_campaign keys in the raw data map to their canonical form
+// so both UTMs are summed together under the same key.
+function asmNormalizeAliases_(data, aliases) {
+  Object.keys(aliases).forEach(function(alias) {
+    if (!data[alias]) return;
+    var canonical = aliases[alias];
+    if (!data[canonical]) data[canonical] = {};
+    Object.keys(data[alias]).forEach(function(ym) {
+      data[canonical][ym] = (data[canonical][ym] || 0) + data[alias][ym];
+    });
+    delete data[alias];
+  });
+  return data;
 }
 
 

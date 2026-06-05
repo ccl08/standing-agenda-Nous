@@ -128,6 +128,101 @@ function testNotionSync() {
 }
 
 
+// ── Two-day window dry-run test ───────────────────────────────
+// Run testTwoDayWindow() to preview what notionSync() would write
+// using the 2-day attribution window. Nothing is written to Notion.
+// Set NS_TEST_POST_DATE to the story's post date (not today or tomorrow).
+
+var NS_TEST_POST_DATE = '2026-06-03'; // post date to test
+
+function testTwoDayWindow() {
+  var p        = NS_TEST_POST_DATE.split('-');
+  var postDate = new Date(+p[0], +p[1] - 1, +p[2]);
+  var nextDay  = new Date(+p[0], +p[1] - 1, +p[2] + 1);
+  var dateWindow = [NS_TEST_POST_DATE, nsFmtDate_(nextDay)];
+
+  Logger.log('=== DRY RUN: 2-day window for posts on ' + NS_TEST_POST_DATE + ' ===');
+  Logger.log('Date window: ' + dateWindow.join(' + '));
+
+  var amp  = nsLoadAmplitude_();
+  var posts = nsLoadPosts_();
+  var corr  = nsLoadCorrections_();
+
+  Logger.log('Amplitude rows : ' + amp.length);
+
+  // Show which dates are actually present in the Amplitude sheet for this window
+  var windowCounts = {};
+  dateWindow.forEach(function(d) {
+    windowCounts[d] = amp.filter(function(r) { return r.dateStr === d; }).length;
+  });
+  Logger.log('Amplitude rows in window: ' + JSON.stringify(windowCounts));
+
+  var testPosts = posts.filter(function(post) {
+    return nsFmtDate_(post.postDate) === NS_TEST_POST_DATE;
+  });
+
+  Logger.log('Posts on ' + NS_TEST_POST_DATE + ': ' + testPosts.length);
+  if (testPosts.length === 0) {
+    Logger.log('No posts found. Adjust NS_TEST_POST_DATE or check the Posts sheet.');
+    return;
+  }
+
+  var logs = [];
+  var runTime = new Date();
+
+  testPosts.forEach(function(post) {
+    Logger.log('--- ' + post.influencer + ' ---');
+    try {
+      var key = nsResolveKey_(post, corr, amp);
+      Logger.log('  Key      : ' + (key || 'UNRESOLVED'));
+      if (!key) {
+        logs.push([runTime, 'DRY RUN unresolved', post.influencer]);
+        return;
+      }
+
+      var m = nsSumWindow_(amp, key, dateWindow);
+
+      if (m.lp === 0) {
+        var urlKey = nsExtractUtm_(post.ampMatchUrl);
+        if (urlKey && urlKey !== key) {
+          var m2 = nsSumWindow_(amp, urlKey, dateWindow);
+          if (m2.lp > 0) { m = m2; key = urlKey; Logger.log('  → URL fallback: ' + key); }
+        }
+      }
+
+      if (m.lp === 0) {
+        var fb = nsSimilarityFallback_(key, amp, dateWindow);
+        if (fb) { m = fb.metrics; key = fb.key; Logger.log('  → Similarity fallback: ' + key); }
+      }
+
+      // For comparison: show single-day totals alongside the 2-day total
+      var d0 = nsSum_(amp, key, dateWindow[0]);
+      var d1 = nsSum_(amp, key, dateWindow[1]);
+      Logger.log('  Day 1 (' + dateWindow[0] + '): LP=' + d0.lp + ' Acc=' + d0.acc + ' Del=' + d0.del);
+      Logger.log('  Day 2 (' + dateWindow[1] + '): LP=' + d1.lp + ' Acc=' + d1.acc + ' Del=' + d1.del);
+      Logger.log('  2-day total          : LP=' + m.lp  + ' Acc=' + m.acc  + ' Del=' + m.del);
+      Logger.log('  Page ID  : ' + post.pageId);
+
+      if (m.lp === 0 && m.acc === 0 && m.del === 0) {
+        Logger.log('  Status   : would SKIP (no data in window)');
+        logs.push([runTime, 'DRY RUN no data', post.influencer]);
+        return;
+      }
+
+      Logger.log('  Status   : would WRITE LP=' + m.lp + ' Acc=' + m.acc + ' Del=' + m.del + ' (not sent)');
+      logs.push([runTime, 'DRY RUN LP=' + m.lp + ' Acc=' + m.acc + ' Del=' + m.del, post.influencer]);
+
+    } catch (e) {
+      Logger.log('  Status   : ❌ ' + e.message);
+      logs.push([runTime, 'DRY RUN ERR ' + e.message.substring(0, 100), post.influencer]);
+    }
+  });
+
+  nsWriteLog_(logs);
+  Logger.log('=== DRY RUN complete — nothing written to Notion ===');
+}
+
+
 // ── Entry point ───────────────────────────────────────────────
 
 function notionSync() {
@@ -141,16 +236,18 @@ function notionSync() {
   Logger.log('Posts in window: ' + posts.length);
   Logger.log('Corrections    : ' + Object.keys(corr).length);
 
-  // Only process yesterday's posts — the Amplitude sheet holds exactly one day of data
-  var now       = new Date();
-  var yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  // Process posts from the last 2 days. A story posted on day D is still live on day D+1,
+  // so we run on both days to capture the full cumulative total and overwrite with the latest.
+  var now        = new Date();
+  var yesterday  = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  var twoDaysAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 2);
   posts = posts.filter(function(p) {
     var d = new Date(p.postDate.getFullYear(), p.postDate.getMonth(), p.postDate.getDate());
-    return d.getTime() === yesterday.getTime();
+    return d.getTime() === yesterday.getTime() || d.getTime() === twoDaysAgo.getTime();
   });
 
-  var yesterdayStr = nsFmtDate_(yesterday);
-  Logger.log('Yesterday posts: ' + posts.length + ' (' + yesterdayStr + ')');
+  Logger.log('Posts in 2-day window: ' + posts.length +
+    ' (' + nsFmtDate_(twoDaysAgo) + ' + ' + nsFmtDate_(yesterday) + ')');
 
   var updated = 0, skipped = 0, errors = 0;
   var logs    = [];
@@ -158,6 +255,12 @@ function notionSync() {
 
   posts.forEach(function(post) {
     try {
+      // Build the 2-day date window for this post: post date + the following day
+      var postDateStr  = nsFmtDate_(post.postDate);
+      var nextDay      = new Date(post.postDate.getFullYear(), post.postDate.getMonth(), post.postDate.getDate() + 1);
+      var nextDateStr  = nsFmtDate_(nextDay);
+      var dateWindow   = [postDateStr, nextDateStr];
+
       var key = nsResolveKey_(post, corr, amp);
       if (!key) {
         skipped++;
@@ -165,20 +268,20 @@ function notionSync() {
         return;
       }
 
-      var m = nsSum_(amp, key, yesterdayStr);
+      var m = nsSumWindow_(amp, key, dateWindow);
 
       // Pass 1: URL-derived utm_campaign
       if (m.lp === 0) {
         var urlKey = nsExtractUtm_(post.ampMatchUrl);
         if (urlKey && urlKey !== key) {
-          var m2 = nsSum_(amp, urlKey, yesterdayStr);
+          var m2 = nsSumWindow_(amp, urlKey, dateWindow);
           if (m2.lp > 0) { m = m2; key = urlKey; }
         }
       }
 
       // Pass 2: string similarity against active keys
       if (m.lp === 0) {
-        var fb = nsSimilarityFallback_(key, amp, yesterdayStr);
+        var fb = nsSimilarityFallback_(key, amp, dateWindow);
         if (fb) { m = fb.metrics; key = fb.key; }
       }
 
@@ -190,7 +293,7 @@ function notionSync() {
       }
 
       nsUpdateNotionPage_(post.pageId, m.lp, m.acc, m.del);
-      Logger.log('✓ ' + post.influencer + ' | ' + yesterdayStr +
+      Logger.log('✓ ' + post.influencer + ' | ' + dateWindow.join('+') +
         ' | LP=' + m.lp + ' Acc=' + m.acc + ' Del=' + m.del + ' [' + key + ']');
       logs.push([runTime, '✅ matched LP=' + m.lp + ' Acc=' + m.acc + ' Del=' + m.del, post.influencer]);
       updated++;
@@ -337,10 +440,15 @@ function nsResolveKey_(post, corrections, amp) {
 // ── Amplitude aggregation ─────────────────────────────────────
 
 function nsSum_(amp, key, dateStr) {
+  return nsSumWindow_(amp, key, [dateStr]);
+}
+
+// Sums metrics for a key across all dates in the dateStrs array.
+function nsSumWindow_(amp, key, dateStrs) {
   var lp = 0, acc = 0, del = 0;
   for (var i = 0; i < amp.length; i++) {
     var r = amp[i];
-    if (r.utm_campaign === key && r.dateStr === dateStr) {
+    if (r.utm_campaign === key && dateStrs.indexOf(r.dateStr) !== -1) {
       lp  += r.lp;
       acc += r.acc;
       del += r.del;
@@ -349,11 +457,13 @@ function nsSum_(amp, key, dateStr) {
   return { lp: lp, acc: acc, del: del };
 }
 
-function nsSimilarityFallback_(key, amp, dateStr) {
+// dateStrs can be a string (single date) or array of date strings.
+function nsSimilarityFallback_(key, amp, dateStrs) {
+  if (typeof dateStrs === 'string') dateStrs = [dateStrs];
   var active = {};
   for (var i = 0; i < amp.length; i++) {
     var r = amp[i];
-    if (r.dateStr === dateStr && r.lp > 0) {
+    if (dateStrs.indexOf(r.dateStr) !== -1 && r.lp > 0) {
       active[r.utm_campaign] = true;
     }
   }
@@ -366,7 +476,7 @@ function nsSimilarityFallback_(key, amp, dateStr) {
   });
 
   if (bestSim >= 0.75 && bestKey) {
-    var m = nsSum_(amp, bestKey, dateStr);
+    var m = nsSumWindow_(amp, bestKey, dateStrs);
     if (m.lp > 0) return { key: bestKey, metrics: m };
   }
   return null;
