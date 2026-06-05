@@ -17,7 +17,7 @@
 var ALR_SHEET_ID          = '19COFeVqjvByU1NZUVnBnuxA1_6eBToZnitGzz0mRWlA';
 var ALR_NOTION_VALUES_ID  = '1eFkukSGwI7E4bQFk2lolekx3abQkYKBzr3r2V8bpV6A';
 var ALR_UTM_TAB           = 'UTM-Mapping';
-var ALR_AFF_TAB           = 'Affiliates-data';
+var ALR_AFF_TAB           = 'Affiliates-daily-data';
 var ALR_OUTPUT_TAB        = 'Supabase';
 
 var ALR_HEADERS = [
@@ -25,7 +25,7 @@ var ALR_HEADERS = [
   'Date',
   'Page ID',
   'Viewed Marketing Site Landing Page',
-  'Ref Link',
+  'ref_Affiliate link',
   'UTM Final',
   'Influencer Email',
   'Agent Email'
@@ -83,7 +83,7 @@ function alrBuildReport_() {
       return;
     }
 
-    var meta = notionMeta[utmEntry.name.toLowerCase()] || {};
+    var meta = notionMeta[utmEntry.pageId] || {};
 
     rows.push([
       utmEntry.name,
@@ -161,8 +161,8 @@ function alrLoadUtmMap_() {
 
 
 // ── NotionValues metadata loader ──────────────────────────────
-// Reads Influencer Email, Agent Email, and Referral Link from
-// the NotionValues sheet. Returns { name.toLowerCase() → metadata }.
+// Reads Influencer Email, Agent Email, and ref_Affiliate link from
+// the NotionValues sheet. Returns { pageId → metadata }.
 
 function alrLoadNotionMeta_() {
   var ss  = SpreadsheetApp.openById(ALR_NOTION_VALUES_ID);
@@ -171,25 +171,25 @@ function alrLoadNotionMeta_() {
 
   var headers = raw[0].map(function(h) { return String(h).trim().toLowerCase(); });
 
-  var colName    = headers.indexOf('name');
+  var colPageId  = headers.indexOf('page id');
   var colInfEm   = headers.indexOf('influencer email');
   var colAgentEm = headers.indexOf('agent email');
-  var colRefLink = headers.indexOf('referral link');
+  var colRefLink = headers.indexOf('ref_affiliate link');
 
   var meta = {};
 
   for (var i = 1; i < raw.length; i++) {
-    var name = colName !== -1 ? String(raw[i][colName] || '').trim() : '';
-    if (!name) continue;
+    var pageId = colPageId !== -1 ? String(raw[i][colPageId] || '').trim() : '';
+    if (!pageId) continue;
 
-    meta[name.toLowerCase()] = {
+    meta[pageId] = {
       influencerEmail: colInfEm   !== -1 ? String(raw[i][colInfEm]   || '').trim() : '',
       agentEmail:      colAgentEm !== -1 ? String(raw[i][colAgentEm] || '').trim() : '',
       refLink:         colRefLink !== -1 ? String(raw[i][colRefLink]  || '').trim() : ''
     };
   }
 
-  Logger.log('NotionValues meta loaded: ' + Object.keys(meta).length + ' influencers');
+  Logger.log('NotionValues meta loaded: ' + Object.keys(meta).length + ' entries');
   return meta;
 }
 
@@ -229,8 +229,15 @@ function alrLoadAmpData_() {
     rows.push({ utm: utm, date: dateStr, lp: lp });
   }
 
-  Logger.log('Affiliates-data loaded: ' + rows.length + ' rows with LP > 0');
-  return rows;
+  // Deduplicate by utm+date — source tab may have duplicate rows
+  var seen = {}, deduped = [];
+  rows.forEach(function(r) {
+    var key = r.utm + '||' + r.date;
+    if (!seen[key]) { seen[key] = true; deduped.push(r); }
+  });
+
+  Logger.log('Affiliates-data loaded: ' + deduped.length + ' rows (deduped from ' + rows.length + ')');
+  return deduped;
 }
 
 
