@@ -4,7 +4,7 @@
 // Delegations to each Notion post page via REST API.
 //
 // Paste into the same Apps Script project as AmplitudeSync.gs.
-// AmplitudeSync.gs calls notionSync() at the end of dailySync().
+// notionSync() runs on its own hourly trigger (set in Apps Script UI).
 // ============================================================
 
 // Store the token in Apps Script Project Settings → Script Properties (key: NOTION_TOKEN)
@@ -227,6 +227,11 @@ function testTwoDayWindow() {
 
 function notionSync() {
   Logger.log('=== NotionSync start ===');
+
+  if (!NS_NOTION_TOKEN) {
+    Logger.log('ERROR: NOTION_TOKEN script property is missing — add it in Project Settings → Script Properties');
+    return;
+  }
 
   var amp  = nsLoadAmplitude_();
   var posts = nsLoadPosts_();

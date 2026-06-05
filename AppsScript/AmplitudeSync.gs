@@ -9,6 +9,7 @@ var AMPLITUDE_API_KEY    = '6d32ffa2d1954f01a262fcdbb0a3e7b1';
 var AMPLITUDE_SECRET_KEY = '716dfa8ea6e2aa4a4e8cef3cdf3b6fb3';
 var AMPLITUDE_SHEET_ID   = '1eghadoVWL30ALoa8ieemziRJL4rcHOOTniQz40xFlW8';
 var SHEET_TAB            = 'Daily-data';
+var BACKFILL_START       = '20260601'; // YYYYMMDD — update when project start date changes
 
 var EVENTS = [
   'Viewed Marketing Site Landing Page',
@@ -29,8 +30,7 @@ var FILTERS = JSON.stringify([
 
 // ── entry points ─────────────────────────────────────────────
 
-// Runs hourly. Always replaces yesterday's rows with the latest Amplitude data,
-// then triggers NotionSync so Notion stays current.
+// Runs once daily (8am trigger). Replaces yesterday's rows with fresh Amplitude data.
 function dailySync() {
   var now       = new Date();
   var yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
@@ -64,7 +64,7 @@ function backfill() {
 
   var yesterday = new Date();
   yesterday.setDate(yesterday.getDate() - 1);
-  syncRange('20260601', formatDate(yesterday));
+  syncRange(BACKFILL_START, formatDate(yesterday));
 }
 
 // ── core sync ────────────────────────────────────────────────
@@ -164,7 +164,9 @@ function appendToSheet(rows) {
   if (ws.getLastRow() === 0) ws.appendRow(headers);
 
   var values = rows.map(function(row) {
-    return headers.map(function(h) { return row[h] || 0; });
+    return headers.map(function(h, i) {
+      return i < 2 ? (row[h] != null ? row[h] : '') : (row[h] || 0);
+    });
   });
 
   if (values.length > 0) {
