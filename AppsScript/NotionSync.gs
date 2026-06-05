@@ -255,11 +255,13 @@ function notionSync() {
 
   posts.forEach(function(post) {
     try {
-      // Build the 2-day date window for this post: post date + the following day
+      // Build the 2-day date window for this post: post date + the following day,
+      // capped at yesterday so today's incomplete data is never included.
       var postDateStr  = nsFmtDate_(post.postDate);
       var nextDay      = new Date(post.postDate.getFullYear(), post.postDate.getMonth(), post.postDate.getDate() + 1);
+      if (nextDay > yesterday) nextDay = yesterday;
       var nextDateStr  = nsFmtDate_(nextDay);
-      var dateWindow   = [postDateStr, nextDateStr];
+      var dateWindow   = postDateStr === nextDateStr ? [postDateStr] : [postDateStr, nextDateStr];
 
       var key = nsResolveKey_(post, corr, amp);
       if (!key) {
@@ -341,7 +343,14 @@ function nsLoadAmplitude_() {
       del:  Number(r['Delegations']         || 0)
     });
   }
-  return rows;
+
+  // Deduplicate by utm_campaign+date — Daily-data sheet may contain duplicate rows
+  var seen = {}, deduped = [];
+  rows.forEach(function(r) {
+    var k = r.utm_campaign + '||' + r.dateStr;
+    if (!seen[k]) { seen[k] = true; deduped.push(r); }
+  });
+  return deduped;
 }
 
 function nsLoadPosts_() {

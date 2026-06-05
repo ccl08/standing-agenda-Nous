@@ -16,39 +16,45 @@ var EVENTS = [
   'G_delegation_enabled'
 ];
 
+// Maps Amplitude event names → sheet column names (must match what NotionSync reads)
+var EVENT_COL = {
+  'Viewed Marketing Site Landing Page': 'Viewed Landing Page',
+  'G_account_created':                  'Accounts Created',
+  'G_delegation_enabled':               'Delegations'
+};
+
 var FILTERS = JSON.stringify([
   { prop: 'gp:utm_medium', op: 'is', values: ['Influencers'] }
 ]);
 
 // ── entry points ─────────────────────────────────────────────
 
+// Runs hourly. Always replaces yesterday's rows with the latest Amplitude data,
+// then triggers NotionSync so Notion stays current.
 function dailySync() {
-  var now        = new Date();
-  var yesterday  = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-  var twoDaysAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 2);
+  var now       = new Date();
+  var yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  var dateIso   = formatDateIso(yesterday);
+  var dateStr   = formatDate(yesterday);
 
-  var startStr  = formatDate(twoDaysAgo);
-  var endStr    = formatDate(yesterday);
-  var dateIsos  = [formatDateIso(twoDaysAgo), formatDateIso(yesterday)];
+  Logger.log('Daily sync: ' + dateIso);
 
-  Logger.log('Daily sync window: ' + dateIsos.join(' → '));
+  deleteRowsForDate_(dateIso);
 
   var allData = {};
   for (var i = 0; i < EVENTS.length; i++) {
     Logger.log('Fetching: ' + EVENTS[i]);
-    allData[EVENTS[i]] = fetchAmplitude(EVENTS[i], startStr, endStr);
+    allData[EVENTS[i]] = fetchAmplitude(EVENTS[i], dateStr, dateStr);
   }
-
   var rows = buildRows(allData);
   Logger.log('Built ' + rows.length + ' rows');
-
-  upsertToSheet(rows, dateIsos);
-  Logger.log('Amplitude → Sheets done. Starting Notion sync...');
-  notionSync();
+  appendToSheet(rows);
+  Logger.log('Replaced ' + rows.length + ' rows for ' + dateIso);
+  Logger.log('Amplitude → Sheets done.');
 }
 
+// Clears the sheet and re-fetches everything from the start date.
 function backfill() {
-  // Clear all data rows (keep header) so re-runs are safe
   var ss = SpreadsheetApp.openById(AMPLITUDE_SHEET_ID);
   var ws = ss.getSheetByName(SHEET_TAB);
   if (ws && ws.getLastRow() > 1) {
@@ -75,7 +81,7 @@ function syncRange(start, end) {
   var rows = buildRows(allData);
   Logger.log('Built ' + rows.length + ' rows');
 
-  writeToSheet(rows);
+  appendToSheet(rows);
   Logger.log('Done');
 }
 
@@ -88,7 +94,7 @@ function fetchAmplitude(eventName, start, end) {
     g:     'gp:utm_campaign',
     start: start,
     end:   end,
-    m:     'totals',
+    m:     'uniques',
     i:     '1'
   };
 
@@ -129,14 +135,14 @@ function buildRows(allData) {
         var key = campaign + '||' + xValues[j];
         if (!combined[key]) {
           combined[key] = {
-            utm_Campaign: campaign,
-            date:         xValues[j],
-            'Viewed Marketing Site Landing Page': 0,
-            G_account_created:    0,
-            G_delegation_enabled: 0
+            utm_Campaign:         campaign,
+            Date:                 xValues[j],
+            'Viewed Landing Page': 0,
+            'Accounts Created':   0,
+            'Delegations':        0
           };
         }
-        combined[key][eventName] = counts[j] || 0;
+        combined[key][EVENT_COL[eventName]] = counts[j] || 0;
       }
     }
   });
@@ -144,94 +150,61 @@ function buildRows(allData) {
   return Object.keys(combined).map(function(k) { return combined[k]; });
 }
 
-// dateIsos can be a single ISO string or an array — all matching rows are replaced.
-function upsertToSheet(rows, dateIsos) {
-  if (typeof dateIsos === 'string') dateIsos = [dateIsos];
-
+// Appends rows to the sheet. Creates the header row if the sheet is empty.
+function appendToSheet(rows) {
   var ss = SpreadsheetApp.openById(AMPLITUDE_SHEET_ID);
   var ws = ss.getSheetByName(SHEET_TAB);
   if (!ws) ws = ss.insertSheet(SHEET_TAB);
 
   var headers = [
-    'utm_Campaign', 'date',
-    'Viewed Marketing Site Landing Page',
-    'G_account_created', 'G_delegation_enabled'
+    'utm_Campaign', 'Date',
+    'Viewed Landing Page', 'Accounts Created', 'Delegations'
   ];
 
-  if (ws.getLastRow() === 0) {
-    ws.appendRow(headers);
-  } else {
-    var allVals    = ws.getDataRange().getValues();
-    var dateColIdx = allVals[0].indexOf('date');
-    var toDelete   = [];
-    for (var i = 1; i < allVals.length; i++) {
-      var cellVal = allVals[i][dateColIdx];
-      var cellStr = cellVal instanceof Date ? formatDateIso(cellVal) : String(cellVal);
-      if (dateIsos.indexOf(cellStr) !== -1) toDelete.push(i + 1);
-    }
-    for (var j = toDelete.length - 1; j >= 0; j--) {
-      ws.deleteRow(toDelete[j]);
-    }
-  }
+  if (ws.getLastRow() === 0) ws.appendRow(headers);
 
   var values = rows.map(function(row) {
     return headers.map(function(h) { return row[h] || 0; });
   });
+
   if (values.length > 0) {
     ws.getRange(ws.getLastRow() + 1, 1, values.length, headers.length).setValues(values);
   }
-  Logger.log('Upserted ' + values.length + ' rows for [' + dateIsos.join(', ') + '] to ' + SHEET_TAB);
 }
 
-function writeToSheet(rows) {
+// Deletes all rows for the given dateIso from the sheet.
+function deleteRowsForDate_(dateIso) {
   var ss = SpreadsheetApp.openById(AMPLITUDE_SHEET_ID);
   var ws = ss.getSheetByName(SHEET_TAB);
+  if (!ws || ws.getLastRow() < 2) return;
 
-  if (!ws) {
-    ws = ss.insertSheet(SHEET_TAB);
+  var allVals  = ws.getDataRange().getValues();
+  var toDelete = [];
+  for (var i = 1; i < allVals.length; i++) {
+    var cellVal = allVals[i][1]; // Date is column index 1
+    var cellStr = cellVal instanceof Date ? formatDateIso(cellVal) : String(cellVal).trim();
+    if (cellStr === dateIso) toDelete.push(i + 1);
   }
-
-  var headers = [
-    'utm_Campaign', 'date',
-    'Viewed Marketing Site Landing Page',
-    'G_account_created', 'G_delegation_enabled'
-  ];
-
-  if (ws.getLastRow() === 0) {
-    ws.appendRow(headers);
+  for (var j = toDelete.length - 1; j >= 0; j--) {
+    ws.deleteRow(toDelete[j]);
   }
-
-  var values = rows.map(function(row) {
-    return headers.map(function(h) { return row[h] || 0; });
-  });
-
-  if (values.length > 0) {
-    ws.getRange(ws.getLastRow() + 1, 1, values.length, headers.length)
-      .setValues(values);
-  }
-
-  Logger.log('Wrote ' + values.length + ' rows to ' + SHEET_TAB);
+  if (toDelete.length > 0) Logger.log('Deleted ' + toDelete.length + ' rows for ' + dateIso);
 }
 
 // ── trigger setup ─────────────────────────────────────────────
 
 function setupDailyTrigger() {
-  // Delete any existing triggers for this script
   ScriptApp.getProjectTriggers().forEach(function(t) {
-    if (t.getHandlerFunction() === 'dailySync') {
-      ScriptApp.deleteTrigger(t);
-    }
+    if (t.getHandlerFunction() === 'dailySync') ScriptApp.deleteTrigger(t);
   });
 
-  [8, 13, 15].forEach(function(hour) {
-    ScriptApp.newTrigger('dailySync')
-      .timeBased()
-      .everyDays(1)
-      .atHour(hour)
-      .create();
-  });
+  ScriptApp.newTrigger('dailySync')
+    .timeBased()
+    .everyDays(1)
+    .atHour(8)
+    .create();
 
-  Logger.log('Triggers set for dailySync() at 8am, 1pm, 3pm');
+  Logger.log('Trigger set for dailySync() at 8am daily');
 }
 
 // ── helpers ───────────────────────────────────────────────────
